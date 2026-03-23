@@ -149,7 +149,59 @@ class CannyScratch:
         final_edges = np.clip(final_edges, 0, 255).astype(np.uint8)
         return np.stack([final_edges, final_edges, final_edges], axis=2)
 
+# ── HOUGH TRANSFORM FROM SCRATCH (VECTORIZED) ─────────────────────────────────
 
+class HoughScratch:
+    @staticmethod
+    def detect_lines(img_array, threshold_votes=100):
+        # 1. Get Edges (Using cv2.Canny here to quickly prep the image for the Hough math)
+        gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
+        edges = cv2.Canny(gray, 50, 150)
+        
+        # 2. Setup standard Hough Transform parameters
+        height, width = edges.shape
+        max_rho = int(np.ceil(np.sqrt(height**2 + width**2)))
+        thetas = np.deg2rad(np.arange(-90, 90))
+        rhos = np.arange(-max_rho, max_rho, 1)
+        
+        # 3. Vectorized Accumulator (Voting Matrix)
+        accumulator = np.zeros((len(rhos), len(thetas)), dtype=np.int32)
+        y_idxs, x_idxs = np.nonzero(edges) # Get all edge pixels instantly
+        
+        cos_t = np.cos(thetas)
+        sin_t = np.sin(thetas)
+        
+        # Fast voting: Calculate rho for all edge pixels simultaneously for each angle
+        for i in range(len(thetas)):
+            rho_vals = np.round(x_idxs * cos_t[i] + y_idxs * sin_t[i]).astype(int) + max_rho
+            counts = np.bincount(rho_vals)
+            accumulator[:len(counts), i] += counts
+            
+        # 4. Find peaks (Lines with more votes than our threshold)
+        output_img = img_array.copy()
+        rho_peaks, theta_peaks = np.where(accumulator > threshold_votes)
+        
+        # 5. Draw the mathematical lines back onto the image
+        for r_idx, t_idx in zip(rho_peaks, theta_peaks):
+            rho = rhos[r_idx]
+            theta = thetas[t_idx]
+            
+            a = np.cos(theta)
+            b = np.sin(theta)
+            x0 = a * rho
+            y0 = b * rho
+            
+            # Extend the line across the image mathematically
+            x1 = int(x0 + 2000 * (-b))
+            y1 = int(y0 + 2000 * (a))
+            x2 = int(x0 - 2000 * (-b))
+            y2 = int(y0 - 2000 * (a))
+            
+            # Draw a thick blue line (BGR format in OpenCV, so RGB here is Red=(255,0,0) or Cyan=(0,255,255))
+            cv2.line(output_img, (x1, y1), (x2, y2), (0, 255, 255), 2)
+            
+        return output_img
+    
 class ActiveContourProcessor:
     @staticmethod
     def evolve_snake(img_array, init_radius=50):
@@ -164,34 +216,23 @@ class ActiveContourProcessor:
 
 class SessionManager:
     DEFAULTS = {
-        "img_history": [],
-        "action_history": [], # Tracks the text label
-        "low_history": [],    # Tracks the low slider
-        "high_history": [],   # Tracks the high slider
-        "img_original": None,
-        "mode": "shapes",
-        "last_action": "",
-        "canny_low": 50,
-        "canny_high": 150,
-        "chain_code": None,
-        "perimeter": None,
-        "area": None,
+        "img_history": [], "action_history": [], "low_history": [], "high_history": [], "hough_history": [],
+        "img_original": None, "mode": "shapes", "last_action": "",
+        "canny_low": 50, "canny_high": 150, "hough_thresh": 100,
+        "chain_code": None, "perimeter": None, "area": None,
     }
-
     @classmethod
     def init_session(cls, session):
         for key, default in cls.DEFAULTS.items():
-            if key not in session:
-                session[key] = default
-
+            if key not in session: session[key] = default
+            
     @staticmethod
     def get_state(session):
         return {k: session.get(k, v) for k, v in SessionManager.DEFAULTS.items()}
-
+    
     @staticmethod
     def save_state(session, state):
-        for key, value in state.items():
-            session[key] = value
+        for key, value in state.items(): session[key] = value
         session.modified = True
 
 
@@ -214,6 +255,7 @@ class StateView(APIView):
             "chain_code": state["chain_code"], 
             "perimeter": state["perimeter"], 
             "area": state["area"],
+            "hough_thresh": state.get("hough_thresh", 100),
         })
 
 class UploadView(APIView):
@@ -228,27 +270,25 @@ class UploadView(APIView):
 
         state = SessionManager.get_state(request.session)
         state.update({
-            "img_history": [data_url], 
-            "action_history": [""],
-            "low_history": [50],
-            "high_history": [150],
-            "img_original": data_url, 
-            "last_action": "", 
-            "canny_low": 50,
-            "canny_high": 150,
-            "chain_code": None, 
-            "perimeter": None, 
-            "area": None
+            "img_history": [data_url], "action_history": [""],
+            "low_history": [50], "high_history": [150], "hough_history": [100],
+            "img_original": data_url, "last_action": "", 
+            "canny_low": 50, "canny_high": 150, "hough_thresh": 100,
+            "chain_code": None, "perimeter": None, "area": None
         })
         SessionManager.save_state(request.session, state)
         
+        # FIX: Explicitly send empty strings/nulls back to React to clear the UI
         return Response({
             "current_url": data_url, 
-            "original_url": data_url,
-            "has_image": True,
-            "can_undo": False 
+            "original_url": data_url, 
+            "has_image": True, 
+            "can_undo": False,
+            "last_action": "",
+            "chain_code": None,
+            "perimeter": None,
+            "area": None
         })
-
 class DetectShapesView(APIView):
     parser_classes = [JSONParser, MultiPartParser, FormParser]
     def post(self, request):
@@ -259,38 +299,45 @@ class DetectShapesView(APIView):
         shape_type = request.data.get("shape_type", "canny")
         low_t = int(request.data.get("canny_low", 50))
         high_t = int(request.data.get("canny_high", 150))
+        h_thresh = int(request.data.get("hough_thresh", 100))
         
         try:
             arr = np.array(data_url_to_pil(state["img_original"]))
+            action_text = ""
+            
             if shape_type == "canny":
                 out_arr = CannyScratch.detect(arr, low_t, high_t)
+                action_text = f"Canny [{low_t}-{high_t}]"
+            elif shape_type == "lines":
+                out_arr = HoughScratch.detect_lines(arr, h_thresh)
+                action_text = f"Lines [Votes > {h_thresh}]"
             else:
                 out_arr = arr.copy() 
+                action_text = f"Detected {shape_type}"
                 
             new_url = pil_to_data_url(Image.fromarray(out_arr))
             
-            # Sync all parallel histories
             state["img_history"].append(new_url)
-            state["action_history"].append(f"Canny [{low_t}-{high_t}]")
+            state["action_history"].append(action_text)
             state["low_history"].append(low_t)
             state["high_history"].append(high_t)
+            state["hough_history"].append(h_thresh)
             
             state["last_action"] = state["action_history"][-1]
             state["canny_low"] = low_t
             state["canny_high"] = high_t
+            state["hough_thresh"] = h_thresh
             SessionManager.save_state(request.session, state)
             
             return Response({
-                "current_url": new_url, 
-                "original_url": state["img_original"],
-                "last_action": state["last_action"],
-                "can_undo": len(state["img_history"]) > 1
+                "current_url": new_url, "original_url": state["img_original"],
+                "last_action": state["last_action"], "can_undo": len(state["img_history"]) > 1
             })
         except Exception as e:
             import traceback
             traceback.print_exc() 
-            return Response({"error": f"Backend Error: {str(e)}. Check the terminal!"}, status=500)
-
+            return Response({"error": f"Backend Error: {str(e)}"}, status=500)
+        
 class ActiveContourView(APIView):
     parser_classes = [JSONParser, MultiPartParser, FormParser]
     def post(self, request):
@@ -324,9 +371,37 @@ class SwitchModeView(APIView):
     parser_classes = [JSONParser]
     def post(self, request):
         mode = request.data.get("mode", "shapes")
-        request.session["mode"] = mode
-        request.session.modified = True
-        return Response({"mode": mode})
+        state = SessionManager.get_state(request.session)
+        
+        # FIX: Reset the workspace automatically when changing tasks
+        if state.get("img_original"):
+            state["img_history"] = [state["img_original"]]
+            state["action_history"] = [""]
+            state["low_history"] = [50]
+            state["high_history"] = [150]
+            state["hough_history"] = [100]
+            
+            state["last_action"] = ""
+            state["canny_low"] = 50
+            state["canny_high"] = 150
+            state["hough_thresh"] = 100
+            state["chain_code"] = None
+            state["perimeter"] = None
+            state["area"] = None
+            
+        state["mode"] = mode
+        SessionManager.save_state(request.session, state)
+        
+        # Return the clean slate back to React
+        return Response({
+            "mode": mode,
+            "current_url": state.get("img_original"),
+            "last_action": "",
+            "can_undo": False,
+            "chain_code": None,
+            "perimeter": None,
+            "area": None
+        })
 
 class UndoView(APIView):
     def post(self, request):
@@ -336,19 +411,19 @@ class UndoView(APIView):
             state["action_history"].pop()
             state["low_history"].pop()
             state["high_history"].pop()
+            state["hough_history"].pop()
             
-            # Snap current state back to the previous item in the arrays
             state["last_action"] = state["action_history"][-1]
             state["canny_low"] = state["low_history"][-1]
             state["canny_high"] = state["high_history"][-1]
+            state["hough_thresh"] = state["hough_history"][-1]
             SessionManager.save_state(request.session, state)
             
         return Response({
             "current_url": state["img_history"][-1] if state["img_history"] else None,
-            "original_url": state["img_original"],
-            "last_action": state["last_action"],
-            "canny_low": state["canny_low"],
-            "canny_high": state["canny_high"],
+            "original_url": state["img_original"], "last_action": state["last_action"],
+            "canny_low": state["canny_low"], "canny_high": state["canny_high"],
+            "hough_thresh": state.get("hough_thresh", 100),
             "can_undo": len(state["img_history"]) > 1
         })
 
@@ -356,23 +431,22 @@ class ResetView(APIView):
     def post(self, request):
         state = SessionManager.get_state(request.session)
         if state["img_original"]:
-            # Slice the arrays back down to the very first index
             state["img_history"] = [state["img_original"]]
             state["action_history"] = [""]
             state["low_history"] = [50]
             state["high_history"] = [150]
+            state["hough_history"] = [100]
             
             state["last_action"] = ""
             state["canny_low"] = 50
             state["canny_high"] = 150
+            state["hough_thresh"] = 100
             state["chain_code"] = None; state["perimeter"] = None; state["area"] = None
             SessionManager.save_state(request.session, state)
             
         return Response({
-            "current_url": state["img_original"],
-            "original_url": state["img_original"],
-            "last_action": state["last_action"],
-            "canny_low": state["canny_low"],
-            "canny_high": state["canny_high"],
+            "current_url": state["img_original"], "original_url": state["img_original"],
+            "last_action": state["last_action"], "canny_low": state["canny_low"],
+            "canny_high": state["canny_high"], "hough_thresh": state["hough_thresh"],
             "can_undo": False
         })
