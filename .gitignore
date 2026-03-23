@@ -1,0 +1,26 @@
+# IDEs and Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Python virtual environments
+.venv/
+venv/
+env/
+
+# Python Cache
+__pycache__/
+*.pyc
+
+# Node modules (if applicable)
+node_modules/
+
+# Logs and Databases
+logs/
+*.log
+db.sqlite3
+
+# OS generated files
+.DS_Store
+Thumbs.db
