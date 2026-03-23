@@ -1,9 +1,11 @@
 from django.urls import path
 from django.conf import settings
 from django.conf.urls.static import static
+from django.views.generic import RedirectView
 from . import views
 
 urlpatterns = [
+    path("",                     RedirectView.as_view(url="http://localhost:5173/", permanent=False)),
     path("api/state/",           views.StateView.as_view(),          name="api-state"),
     path("api/upload/",          views.UploadView.as_view(),         name="api-upload"),
     path("api/undo/",            views.UndoView.as_view(),           name="api-undo"),

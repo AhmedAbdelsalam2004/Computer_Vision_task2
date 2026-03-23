@@ -18,8 +18,8 @@ export const api = {
     const res = await axios.post(`${API_URL}/detect-shapes/`, data);
     return res.data;
   },
-  activeContour: async (data) => {
-    const res = await axios.post(`${API_URL}/active-contour/`, data);
+  activeContour: async (params = {}) => {
+    const res = await axios.post(`${API_URL}/active-contour/`, params);
     return res.data;
   },
   undo: async () => {
