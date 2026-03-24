@@ -52,46 +52,49 @@ class CannyScratch:
         theta = np.arctan2(Iy, Ix)
         return G, theta
 
+    
+
     @staticmethod
     def non_maximum_suppression(img, D):
         M, N = img.shape
+        # Convert radians to degrees
         angle = D * 180. / np.pi
+        # Normalize to [0, 180) range
         angle[angle < 0] += 180
         
-        # Pad image to handle borders safely and instantly
+        # Pad image to handle borders safely
         img_pad = np.pad(img, 1, mode='constant')
         
-        # Angle 0
-        mask_0 = ((angle >= 0) & (angle < 22.5)) | ((angle >= 157.5) & (angle <= 180))
-        q_0 = img_pad[1:M+1, 2:N+2]
-        r_0 = img_pad[1:M+1, 0:N]
-        
-        # Angle 45
-        mask_45 = (angle >= 22.5) & (angle < 67.5)
-        q_45 = img_pad[2:M+2, 0:N]
-        r_45 = img_pad[0:M, 2:N+2]
-        
-        # Angle 90
-        mask_90 = (angle >= 67.5) & (angle < 112.5)
-        q_90 = img_pad[2:M+2, 1:N+1]
-        r_90 = img_pad[0:M, 1:N+1]
-        
-        # Angle 135
-        mask_135 = (angle >= 112.5) & (angle < 157.5)
-        q_135 = img_pad[0:M, 0:N]
-        r_135 = img_pad[2:M+2, 2:N+2]
-        
-        # Build matrices
+        # Initialize comparison matrices
         q = np.zeros((M, N), dtype=np.float32)
         r = np.zeros((M, N), dtype=np.float32)
-        
-        q[mask_0] = q_0[mask_0]; r[mask_0] = r_0[mask_0]
-        q[mask_45] = q_45[mask_45]; r[mask_45] = r_45[mask_45]
-        q[mask_90] = q_90[mask_90]; r[mask_90] = r_90[mask_90]
-        q[mask_135] = q_135[mask_135]; r[mask_135] = r_135[mask_135]
-        
-        # Keep if max
+
+        # 1. Horizontal [-22.5, 22.5] 
+        # Because we normalized to [0, 180], -22.5 to 22.5 becomes:
+        # [0, 22.5] AND [157.5, 180]
+        mask_0 = ((angle >= 0) & (angle < 22.5)) | ((angle >= 157.5) & (angle <= 180))
+        q[mask_0] = img_pad[1:M+1, 2:N+2][mask_0] # Right
+        r[mask_0] = img_pad[1:M+1, 0:N][mask_0]   # Left
+
+        # 2. Diagonal [22.5, 67.5]
+        mask_45 = (angle >= 22.5) & (angle < 67.5)
+        q[mask_45] = img_pad[0:M, 2:N+2][mask_45]   # Top-Right
+        r[mask_45] = img_pad[2:M+2, 0:N][mask_45]   # Bottom-Left
+
+        # 3. Vertical [67.5, 112.5]
+        mask_90 = (angle >= 67.5) & (angle < 112.5)
+        q[mask_90] = img_pad[0:M, 1:N+1][mask_90]   # Top
+        r[mask_90] = img_pad[2:M+2, 1:N+1][mask_90] # Bottom
+
+        # 4. Off-Diagonal [112.5, 157.5]
+        mask_135 = (angle >= 112.5) & (angle < 157.5)
+        q[mask_135] = img_pad[0:M, 0:N][mask_135]     # Top-Left
+        r[mask_135] = img_pad[2:M+2, 2:N+2][mask_135] # Bottom-Right
+
+        # Keep pixel value only if it is greater than or equal to its neighbors 
+        # along the gradient direction
         Z = np.where((img >= q) & (img >= r), img, 0).astype(np.int32)
+        
         return Z
 
     @staticmethod
@@ -264,6 +267,7 @@ class HoughCircleScratch:
             output_img = cls.draw_circle_numpy(output_img, cx, cy, r, (0, 255, 100))
             
         return output_img
+
 
 class EllipseDetectorScratch:
     @staticmethod
@@ -527,7 +531,7 @@ class ActiveContourProcessor:
         return -mag  # snake moves toward negative (strong edges)
 
     @staticmethod
-    def build_snake_matrix(n, alpha, beta, gamma):
+    def build_snake_matrix(n, alpha, beta):
         """Build the pentadiagonal regularisation matrix A for linearised snake update."""
         # Internal energy: alpha * (elasticity) + beta * (curvature stiffness)
         a = beta
@@ -586,7 +590,7 @@ class ActiveContourProcessor:
         fy = cv2.Sobel(ext_energy.astype(np.float32), cv2.CV_32F, 0, 1, ksize=3)
 
         # Build internal energy matrix and pre-invert: (A + gamma*I)^-1
-        A = cls.build_snake_matrix(n_points, alpha, beta, gamma)
+        A = cls.build_snake_matrix(n_points, alpha, beta)
         inv_matrix = np.linalg.inv(A + gamma * np.eye(n_points))
 
         for _ in range(iterations):
