@@ -152,52 +152,45 @@ class CannyScratch:
 # ── HOUGH TRANSFORM FROM SCRATCH (VECTORIZED) ─────────────────────────────────
 
 class HoughScratch:
+    """
+    Refactored Line Detector using the existing CannyScratch.detect.
+    """
     @staticmethod
     def detect_lines(img_array, threshold_votes=100):
-        # 1. Get Edges (Using cv2.Canny here to quickly prep the image for the Hough math)
-        gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
-        edges = cv2.Canny(gray, 50, 150)
+        # Use the already implemented Canny from scratch
+        # CannyScratch.detect returns a 3-channel image, we take one channel for edge mask
+        edges_rgb = CannyScratch.detect(img_array, 50, 150)
+        edges = edges_rgb[:, :, 0] 
         
-        # 2. Setup standard Hough Transform parameters
         height, width = edges.shape
         max_rho = int(np.ceil(np.sqrt(height**2 + width**2)))
         thetas = np.deg2rad(np.arange(-90, 90))
         rhos = np.arange(-max_rho, max_rho, 1)
         
-        # 3. Vectorized Accumulator (Voting Matrix)
+        # Vectorized Accumulator
         accumulator = np.zeros((len(rhos), len(thetas)), dtype=np.int32)
-        y_idxs, x_idxs = np.nonzero(edges) # Get all edge pixels instantly
+        y_idxs, x_idxs = np.nonzero(edges) 
         
         cos_t = np.cos(thetas)
         sin_t = np.sin(thetas)
         
-        # Fast voting: Calculate rho for all edge pixels simultaneously for each angle
         for i in range(len(thetas)):
             rho_vals = np.round(x_idxs * cos_t[i] + y_idxs * sin_t[i]).astype(int) + max_rho
             counts = np.bincount(rho_vals)
             accumulator[:len(counts), i] += counts
             
-        # 4. Find peaks (Lines with more votes than our threshold)
         output_img = img_array.copy()
         rho_peaks, theta_peaks = np.where(accumulator > threshold_votes)
         
-        # 5. Draw the mathematical lines back onto the image
         for r_idx, t_idx in zip(rho_peaks, theta_peaks):
             rho = rhos[r_idx]
             theta = thetas[t_idx]
+            a, b = np.cos(theta), np.sin(theta)
+            x0, y0 = a * rho, b * rho
             
-            a = np.cos(theta)
-            b = np.sin(theta)
-            x0 = a * rho
-            y0 = b * rho
+            x1, y1 = int(x0 + 2000 * (-b)), int(y0 + 2000 * (a))
+            x2, y2 = int(x0 - 2000 * (-b)), int(y0 - 2000 * (a))
             
-            # Extend the line across the image mathematically
-            x1 = int(x0 + 2000 * (-b))
-            y1 = int(y0 + 2000 * (a))
-            x2 = int(x0 - 2000 * (-b))
-            y2 = int(y0 - 2000 * (a))
-            
-            # Draw a thick blue line (BGR format in OpenCV, so RGB here is Red=(255,0,0) or Cyan=(0,255,255))
             cv2.line(output_img, (x1, y1), (x2, y2), (0, 255, 255), 2)
             
         return output_img
@@ -205,147 +198,77 @@ class HoughScratch:
 # ── HOUGH CIRCLE TRANSFORM (100% PURE NUMPY / MATH, NO OPENCV) ─────────────────
 
 class HoughCircleScratch:
-    @staticmethod
-    def rgb_to_gray(img_array):
-        """Pure math RGB to Grayscale conversion (Luminosity method)"""
-        return np.dot(img_array[..., :3], [0.2989, 0.5870, 0.1140]).astype(np.float32)
-
-    @staticmethod
-    def pure_numpy_edges(gray_img):
-        """Finds edges using mathematical finite differences instead of cv2.Canny"""
-        # Pad image by 1 pixel to handle borders safely
-        padded = np.pad(gray_img, 1, mode='edge')
-        
-        # Calculate X and Y gradients by subtracting adjacent pixels
-        dx = padded[1:-1, 2:] - padded[1:-1, :-2]
-        dy = padded[2:, 1:-1] - padded[:-2, 1:-1]
-        
-        # Gradient magnitude (Pythagorean theorem)
-        mag = np.hypot(dx, dy)
-        
-        # Normalize to 0-255
-        mag = mag / (mag.max() + 1e-5) * 255
-        
-        # Keep only the strongest edges (Top 12% of gradients)
-        thresh_val = np.percentile(mag, 88) 
-        return np.where(mag > thresh_val)
-
+    """
+    Refactored Circle Detector using the existing CannyScratch.detect.
+    """
     @staticmethod
     def draw_circle_numpy(img, cx, cy, r, color, thickness=2):
-        """Draws a circle using pure coordinate math instead of cv2.circle"""
+        """Pure math circle drawing."""
         h, w = img.shape[:2]
         y, x = np.ogrid[:h, :w]
-        
-        # Calculate distance of every pixel in the image to the center (cx, cy)
         dist = np.hypot(x - cx, y - cy)
         
-        # Mask pixels that are exactly at distance 'r' (plus/minus thickness)
         outline_mask = (dist >= r - thickness) & (dist <= r + thickness)
         img[outline_mask] = color
-        
-        # Draw the center point (radius 4)
-        center_mask = dist <= 4
-        img[center_mask] = (255, 80, 80) # Blue dot
-        
+        img[dist <= 4] = (255, 80, 80) 
         return img
 
     @classmethod
     def detect_circles(cls, img_array, min_r=20, max_r=100, threshold_ratio=0.45, min_dist=None):
         h, w = img_array.shape[:2]
         
-        # 1. Grayscale without CV
-        gray = cls.rgb_to_gray(img_array)
-        
-        # 2. Edges without CV
-        y_idxs, x_idxs = cls.pure_numpy_edges(gray)
+        # Use the already implemented Canny from scratch instead of custom math
+        edges_rgb = CannyScratch.detect(img_array, 50, 150)
+        edges = edges_rgb[:, :, 0]
+        y_idxs, x_idxs = np.where(edges > 0)
         
         if len(y_idxs) == 0:
             return img_array.copy()
             
-        # Performance safeguard: subsample edges if image is huge
         if len(y_idxs) > 15000:
             step = len(y_idxs) // 15000 + 1
-            y_idxs = y_idxs[::step]
-            x_idxs = x_idxs[::step]
+            y_idxs, x_idxs = y_idxs[::step], x_idxs[::step]
             
-        if min_dist is None:
-            min_dist = max(min_r, 20)
-            
-        min_r = max(5, int(min_r))
-        max_r = max(min_r + 1, int(max_r))
-        r_step = max(1, (max_r - min_r) // 15)
-        r_range = np.arange(min_r, max_r + 1, r_step)
+        min_dist = min_dist or max(min_r, 20)
+        r_range = np.arange(max(5, int(min_r)), max(int(min_r) + 1, int(max_r)) + 1, max(1, (int(max_r) - int(min_r)) // 15))
         
-        # 3. Build 3D Accumulator
         acc_3d = np.zeros((h, w, len(r_range)), dtype=np.int32)
         
         for ri, r in enumerate(r_range):
-            num_angles = max(30, int(2 * np.pi * r))
-            thetas = np.linspace(0, 2 * np.pi, num_angles, endpoint=False)
+            thetas = np.linspace(0, 2 * np.pi, max(30, int(2 * np.pi * r)), endpoint=False)
+            cos_t, sin_t = np.cos(thetas), np.sin(thetas)
             
-            cos_t = np.cos(thetas)
-            sin_t = np.sin(thetas)
-            
-            # Vectorized broadcasting: calculate all voting coordinates simultaneously
             cx = np.round(x_idxs[:, None] + r * cos_t[None, :]).astype(np.int32)
             cy = np.round(y_idxs[:, None] + r * sin_t[None, :]).astype(np.int32)
             
-            # Keep votes inside image boundaries
             valid = (cx >= 0) & (cx < w) & (cy >= 0) & (cy < h)
             np.add.at(acc_3d[:, :, ri], (cy[valid], cx[valid]), 1)
             
-        # 4. Peak Finding (Greedy Non-Maximum Suppression)
         detected = []
         global_max = acc_3d.max()
-        
-        if global_max < 10:
-            return img_array.copy()
+        if global_max < 10: return img_array.copy()
             
         vote_threshold = max(15, int(global_max * threshold_ratio))
         
         for ri, r in enumerate(r_range):
             acc = acc_3d[:, :, ri]
-            
-            # Find all pixels that meet the vote threshold
             peaks_y, peaks_x = np.where(acc >= vote_threshold)
             scores = acc[peaks_y, peaks_x]
             
-            # Sort them from highest votes to lowest
-            sort_idx = np.argsort(scores)[::-1]
-            peaks_y = peaks_y[sort_idx]
-            peaks_x = peaks_x[sort_idx]
-            scores = scores[sort_idx]
-            
-            for cy, cx, score in zip(peaks_y, peaks_x, scores):
-                too_close = False
-                
-                # Check against already found circles based on pure distance
-                for i, d in enumerate(detected):
-                    dist = np.hypot(cx - d[0], cy - d[1])
-                    if dist < min_dist:
-                        too_close = True
-                        # Overwrite if this new circle has more votes
-                        if score > d[3]:
-                            detected[i] = [cx, cy, r, score]
-                        break
-                        
-                if not too_close:
+            for cy, cx, score in zip(peaks_y[np.argsort(scores)[::-1]], peaks_x[np.argsort(scores)[::-1]], np.sort(scores)[::-1]):
+                if not any(np.hypot(cx - d[0], cy - d[1]) < min_dist for d in detected):
                     detected.append([cx, cy, r, score])
                     
-        # 5. Draw Circles without CV
-        detected.sort(key=lambda x: x[3], reverse=True)
         output_img = img_array.copy()
-        
-        for cx, cy, r, score in detected[:30]:
-            output_img = cls.draw_circle_numpy(output_img, cx, cy, r, (0, 255, 100), thickness=2)
+        for cx, cy, r, _ in sorted(detected, key=lambda x: x[3], reverse=True)[:30]:
+            output_img = cls.draw_circle_numpy(output_img, cx, cy, r, (0, 255, 100))
             
         return output_img
-    
+
 class EllipseDetectorScratch:
-    
     @staticmethod
     def draw_ellipse_numpy(img, cx, cy, a, b, angle_deg, color, thickness=2):
-        """Colors pixels that fall on the mathematical boundary of a rotated ellipse"""
+        """Colors pixels that fall on the mathematical boundary of a rotated ellipse."""
         h, w = img.shape[:2]
         y, x = np.ogrid[:h, :w]
         
@@ -375,10 +298,9 @@ class EllipseDetectorScratch:
         
         return img
     
-    
     @staticmethod
     def find_edge_groups(binary_img):
-        """Groups touching edge pixels into contour arrays using BFS"""
+        """Groups touching edge pixels into contour arrays using BFS."""
         pts = np.argwhere(binary_img > 0)
         if len(pts) == 0: return []
         
@@ -404,10 +326,9 @@ class EllipseDetectorScratch:
             
         return contours
     
-    
     @staticmethod
     def math_morph_close(img_mask):
-        """Dilation followed by Erosion using pure 3x3 array shifting"""
+        """Dilation followed by Erosion using pure 3x3 array shifting."""
         p = np.pad(img_mask, 1, mode='edge')
         
         # Dilation (Max Pooling)
@@ -427,10 +348,9 @@ class EllipseDetectorScratch:
         ])
         return closed
     
-    
     @staticmethod
     def _fit_conic(pts):
-        """Algebraic least-squares conic fit in NORMALIZED space. Returns normed coeffs + scale info."""
+        """Algebraic least-squares conic fit in NORMALIZED space."""
         x = pts[:, 0].astype(np.float64)
         y = pts[:, 1].astype(np.float64)
 
@@ -474,16 +394,12 @@ class EllipseDetectorScratch:
 
     @staticmethod
     def _conic_to_ellipse_normalized(a_norm, center_shift, scale):
-        """
-        Convert normalized-space conic coefficients back to image space
-        and extract ellipse geometry.
-        """
+        """Convert normalized-space conic coefficients back to image space."""
         A_, B_, C_, D_, E_, F_ = a_norm.astype(np.float64)
         mx, my = center_shift
         s = scale
 
         # De-normalize the coefficients to original pixel space
-        # Substituting x = (X - mx)/s, y = (Y - my)/s back:
         A = A_ / s**2
         B = B_ / s**2
         C = C_ / s**2
@@ -496,35 +412,31 @@ class EllipseDetectorScratch:
         if B**2 - 4*A*C >= 0:
             return None
 
-        # Solve for center: dF/dx = 2Ax + By + D = 0, dF/dy = Bx + 2Cy + E = 0
+        # Solve for center
         try:
             center = np.linalg.solve([[2*A, B], [B, 2*C]], [-D, -E])
         except np.linalg.LinAlgError:
             return None
         cx_e, cy_e = center
 
-        # Value of conic at center (used to derive semi-axes)
+        # Value of conic at center
         Fp = A*cx_e**2 + B*cx_e*cy_e + C*cy_e**2 + D*cx_e + E*cy_e + F
         if abs(Fp) < 1e-12:
             return None
 
-        # Semi-axes and orientation from eigendecomposition of M = [[A, B/2], [B/2, C]]
-        # eigh returns eigenvalues in ASCENDING order; smaller eigenvalue → larger semi-axis
+        # Semi-axes and orientation
         eig_vals, eig_vecs = np.linalg.eigh([[A, B/2.0], [B/2.0, C]])
         vals = -Fp / eig_vals
         if np.any(vals <= 0) or np.any(~np.isfinite(vals)):
             return None
-        semi = np.sqrt(vals)  # semi[0] ↔ eig_vals[0] (smaller), semi[1] ↔ eig_vals[1] (larger)
+        semi = np.sqrt(vals) 
 
-        # Identify which index is the MAJOR axis (larger semi-axis)
-        major_idx = int(np.argmax(semi))   # index of larger semi-axis
+        major_idx = int(np.argmax(semi)) 
         minor_idx = 1 - major_idx
 
-        a_semi = float(semi[major_idx])    # semi-major
-        b_semi = float(semi[minor_idx])    # semi-minor
+        a_semi = float(semi[major_idx]) 
+        b_semi = float(semi[minor_idx]) 
 
-        # Angle of the major axis = direction of the corresponding eigenvector
-        # eig_vecs[:, idx] is the eigenvector for eig_vals[idx]
         major_vec = eig_vecs[:, major_idx]
         angle_rad = np.arctan2(major_vec[1], major_vec[0])
         angle_deg = float(np.degrees(angle_rad))
@@ -533,29 +445,27 @@ class EllipseDetectorScratch:
 
     @classmethod
     def detect_ellipses(cls, img_array, min_area=200):
+        """Main detection loop using centralized Canny edges."""
         h, w = img_array.shape[:2]
         
-        # 1. Get Edges (Using the new pure math edge function from the Circle class)
-        gray = HoughCircleScratch.rgb_to_gray(img_array)
-        y_idx, x_idx = HoughCircleScratch.pure_numpy_edges(gray)
+        # Get Edges using centralized Canny from scratch
+        edges_rgb = CannyScratch.detect(img_array, 50, 150)
+        binary_edges = (edges_rgb[:, :, 0] > 0).astype(np.uint8)
         
-        binary_edges = np.zeros((h, w), dtype=np.uint8)
-        binary_edges[y_idx, x_idx] = 1
-        
-        # 2. Close Gaps (No cv2.morphologyEx)
+        # Close Gaps
         closed_edges = cls.math_morph_close(binary_edges)
         
-        # 3. Find Contours (No cv2.findContours)
+        # Find Contours
         contours = cls.find_edge_groups(closed_edges)
         
         output_img = img_array.copy()
         drawn_centers = []
 
         for pts in contours:
-            if len(pts) < 15: # Skip tiny fragments
+            if len(pts) < 15: 
                 continue
                 
-            # 4. Filter by Bounding Box Area (No cv2.contourArea)
+            # Filter by Bounding Box Area
             min_x, min_y = np.min(pts, axis=0)
             max_x, max_y = np.max(pts, axis=0)
             bbox_area = (max_x - min_x) * (max_y - min_y)
@@ -587,7 +497,7 @@ class EllipseDetectorScratch:
             if any(np.hypot(ecx - dc[0], ecy - dc[1]) < max(a, b) * 0.5 for dc in drawn_centers):
                 continue
 
-            # 5. Draw the result (No cv2.ellipse)
+            # Draw the result
             output_img = cls.draw_ellipse_numpy(
                 output_img, 
                 cx=ecx, cy=ecy, a=a, b=b, 
