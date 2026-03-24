@@ -202,136 +202,232 @@ class HoughScratch:
             
         return output_img
     
-# ── HOUGH CIRCLE TRANSFORM FROM SCRATCH (GRADIENT-CONSTRAINED) ───────────────
+# ── HOUGH CIRCLE TRANSFORM (100% PURE NUMPY / MATH, NO OPENCV) ─────────────────
 
 class HoughCircleScratch:
     @staticmethod
-    def detect_circles(img_array, min_r=20, max_r=100, threshold_ratio=0.45, min_dist=None):
-        """
-        Gradient-Constrained Hough Circle Transform — fully from scratch.
-        Builds a 3D accumulator (h x w x num_radii), votes along gradient
-        direction and its reverse, smooths each slice, then finds peaks with
-        proper non-maximum suppression across all three dimensions.
-        """
+    def rgb_to_gray(img_array):
+        """Pure math RGB to Grayscale conversion (Luminosity method)"""
+        return np.dot(img_array[..., :3], [0.2989, 0.5870, 0.1140]).astype(np.float32)
+
+    @staticmethod
+    def pure_numpy_edges(gray_img):
+        """Finds edges using mathematical finite differences instead of cv2.Canny"""
+        # Pad image by 1 pixel to handle borders safely
+        padded = np.pad(gray_img, 1, mode='edge')
+        
+        # Calculate X and Y gradients by subtracting adjacent pixels
+        dx = padded[1:-1, 2:] - padded[1:-1, :-2]
+        dy = padded[2:, 1:-1] - padded[:-2, 1:-1]
+        
+        # Gradient magnitude (Pythagorean theorem)
+        mag = np.hypot(dx, dy)
+        
+        # Normalize to 0-255
+        mag = mag / (mag.max() + 1e-5) * 255
+        
+        # Keep only the strongest edges (Top 12% of gradients)
+        thresh_val = np.percentile(mag, 88) 
+        return np.where(mag > thresh_val)
+
+    @staticmethod
+    def draw_circle_numpy(img, cx, cy, r, color, thickness=2):
+        """Draws a circle using pure coordinate math instead of cv2.circle"""
+        h, w = img.shape[:2]
+        y, x = np.ogrid[:h, :w]
+        
+        # Calculate distance of every pixel in the image to the center (cx, cy)
+        dist = np.hypot(x - cx, y - cy)
+        
+        # Mask pixels that are exactly at distance 'r' (plus/minus thickness)
+        outline_mask = (dist >= r - thickness) & (dist <= r + thickness)
+        img[outline_mask] = color
+        
+        # Draw the center point (radius 4)
+        center_mask = dist <= 4
+        img[center_mask] = (255, 80, 80) # Blue dot
+        
+        return img
+
+    @classmethod
+    def detect_circles(cls, img_array, min_r=20, max_r=100, threshold_ratio=0.45, min_dist=None):
         h, w = img_array.shape[:2]
-        gray_u8 = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
-        if min_dist is None:
-            min_dist = max(min_r, 20)
-
-        # ── Step 1: Edges + gradient directions via CannyScratch ──────────────
-        gray = gray_u8.astype(np.float32)
-        blur_k = CannyScratch.gaussian_kernel(5, sigma=1.4)
-        blurred = cv2.filter2D(gray, -1, blur_k)
-        _, theta = CannyScratch.sobel_filters(blurred)  # radians
-
-        # Use a slightly more permissive Canny so we catch more edge pixels
-        edges_rgb = CannyScratch.detect(img_array, low_t=20, high_t=60)
-        edges = cv2.cvtColor(edges_rgb, cv2.COLOR_RGB2GRAY) > 0
-
-        y_idxs, x_idxs = np.where(edges)
+        
+        # 1. Grayscale without CV
+        gray = cls.rgb_to_gray(img_array)
+        
+        # 2. Edges without CV
+        y_idxs, x_idxs = cls.pure_numpy_edges(gray)
+        
         if len(y_idxs) == 0:
             return img_array.copy()
-
-        dirs = theta[y_idxs, x_idxs]  # gradient direction at each edge pixel
-
-        # Guard invalid ranges coming from UI sliders / requests
-        min_r = max(1, int(min_r))
+            
+        # Performance safeguard: subsample edges if image is huge
+        if len(y_idxs) > 15000:
+            step = len(y_idxs) // 15000 + 1
+            y_idxs = y_idxs[::step]
+            x_idxs = x_idxs[::step]
+            
+        if min_dist is None:
+            min_dist = max(min_r, 20)
+            
+        min_r = max(5, int(min_r))
         max_r = max(min_r + 1, int(max_r))
-        threshold_ratio = float(np.clip(threshold_ratio, 0.05, 0.95))
-
-        # ── Step 2: Build accumulator for every radius ────────────────────────
-        r_step = max(1, (max_r - min_r) // 40)   # at most ~40 radius slices
+        r_step = max(1, (max_r - min_r) // 15)
         r_range = np.arange(min_r, max_r + 1, r_step)
-        acc_3d = np.zeros((h, w, len(r_range)), dtype=np.float32)
-
+        
+        # 3. Build 3D Accumulator
+        acc_3d = np.zeros((h, w, len(r_range)), dtype=np.int32)
+        
         for ri, r in enumerate(r_range):
-            acc = np.zeros((h, w), dtype=np.float32)
-            # Vote in both gradient directions
-            for sign in (1.0, -1.0):
-                cx_v = np.round(x_idxs + sign * r * np.cos(dirs)).astype(np.int32)
-                cy_v = np.round(y_idxs + sign * r * np.sin(dirs)).astype(np.int32)
-                valid = (cx_v >= 0) & (cx_v < w) & (cy_v >= 0) & (cy_v < h)
-                np.add.at(acc, (cy_v[valid], cx_v[valid]), 1)
-
-            # Smooth to merge nearby votes
-            blur_sz = max(3, int(r * 0.15) | 1)   # odd kernel proportional to r
-            acc = cv2.GaussianBlur(acc, (blur_sz, blur_sz), blur_sz / 3.0)
-            acc_3d[:, :, ri] = acc
-
-        # ── Step 3: Non-maximum suppression & peak extraction ─────────────────
-        detected = []  # (cx, cy, r, score)
+            num_angles = max(30, int(2 * np.pi * r))
+            thetas = np.linspace(0, 2 * np.pi, num_angles, endpoint=False)
+            
+            cos_t = np.cos(thetas)
+            sin_t = np.sin(thetas)
+            
+            # Vectorized broadcasting: calculate all voting coordinates simultaneously
+            cx = np.round(x_idxs[:, None] + r * cos_t[None, :]).astype(np.int32)
+            cy = np.round(y_idxs[:, None] + r * sin_t[None, :]).astype(np.int32)
+            
+            # Keep votes inside image boundaries
+            valid = (cx >= 0) & (cx < w) & (cy >= 0) & (cy < h)
+            np.add.at(acc_3d[:, :, ri], (cy[valid], cx[valid]), 1)
+            
+        # 4. Peak Finding (Greedy Non-Maximum Suppression)
+        detected = []
+        global_max = acc_3d.max()
+        
+        if global_max < 10:
+            return img_array.copy()
+            
+        vote_threshold = max(15, int(global_max * threshold_ratio))
+        
         for ri, r in enumerate(r_range):
             acc = acc_3d[:, :, ri]
-
-            # Adaptive threshold: after Gaussian smoothing, absolute vote counts
-            # vary a lot across radii/images; using acc.max() is far more stable.
-            acc_max = float(acc.max())
-            if acc_max <= 0:
-                continue
-            min_votes = max(3.0, threshold_ratio * acc_max)
-
-            # Local-max in 2D: dilate and keep only pixels that equal the max in neighbourhood
-            kernel_sz = max(3, int(max(3, min_dist * 0.6)) | 1)
-            dilated = cv2.dilate(acc, np.ones((kernel_sz, kernel_sz), np.uint8))
-            local_max = (acc == dilated) & (acc >= min_votes)
-
-            for cy, cx in zip(*np.where(local_max)):
-                score = float(acc[cy, cx])
-                # Suppress duplicates across radii
-                too_close = any(
-                    np.hypot(cx - d[0], cy - d[1]) < min_dist and abs(r - d[2]) < r_step * 2
-                    for d in detected
-                )
+            
+            # Find all pixels that meet the vote threshold
+            peaks_y, peaks_x = np.where(acc >= vote_threshold)
+            scores = acc[peaks_y, peaks_x]
+            
+            # Sort them from highest votes to lowest
+            sort_idx = np.argsort(scores)[::-1]
+            peaks_y = peaks_y[sort_idx]
+            peaks_x = peaks_x[sort_idx]
+            scores = scores[sort_idx]
+            
+            for cy, cx, score in zip(peaks_y, peaks_x, scores):
+                too_close = False
+                
+                # Check against already found circles based on pure distance
+                for i, d in enumerate(detected):
+                    dist = np.hypot(cx - d[0], cy - d[1])
+                    if dist < min_dist:
+                        too_close = True
+                        # Overwrite if this new circle has more votes
+                        if score > d[3]:
+                            detected[i] = [cx, cy, r, score]
+                        break
+                        
                 if not too_close:
-                    detected.append((int(cx), int(cy), int(r), score))
-
-        # ── Step 4: Keep best circles by score, draw on image ─────────────────
-        detected.sort(key=lambda t: -t[3])
+                    detected.append([cx, cy, r, score])
+                    
+        # 5. Draw Circles without CV
+        detected.sort(key=lambda x: x[3], reverse=True)
         output_img = img_array.copy()
-        drawn = []
-        for cx, cy, r, score in detected:
-            # Final duplicate check across all drawn circles
-            if any(np.hypot(cx - d[0], cy - d[1]) < min_dist * 0.8 for d in drawn):
-                continue
-            cv2.circle(output_img, (cx, cy), r, (0, 255, 100), 2)
-            cv2.circle(output_img, (cx, cy), 4, (255, 80, 80), -1)
-            drawn.append((cx, cy, r))
-            if len(drawn) >= 30:
-                break
-
-        # Fallback: if scratch detector found nothing, use OpenCV HoughCircles
-        # so the feature remains usable for varied images/contrast conditions.
-        if not drawn:
-            try:
-                blur = cv2.GaussianBlur(gray_u8, (9, 9), 2)
-                param2 = int(np.clip(80 - threshold_ratio * 70, 12, 60))
-                circles = cv2.HoughCircles(
-                    blur,
-                    cv2.HOUGH_GRADIENT,
-                    dp=1.2,
-                    minDist=max(10, int(min_dist)),
-                    param1=120,
-                    param2=param2,
-                    minRadius=min_r,
-                    maxRadius=max_r,
-                )
-                if circles is not None:
-                    circles = np.round(circles[0]).astype(int)
-                    for cx, cy, r in circles[:30]:
-                        cv2.circle(output_img, (cx, cy), r, (0, 255, 100), 2)
-                        cv2.circle(output_img, (cx, cy), 4, (255, 80, 80), -1)
-            except cv2.error:
-                pass
-
+        
+        for cx, cy, r, score in detected[:30]:
+            output_img = cls.draw_circle_numpy(output_img, cx, cy, r, (0, 255, 100), thickness=2)
+            
         return output_img
-
-
-# ── ELLIPSE DETECTION — FROM-SCRATCH ALGEBRAIC FITTING ───────────────────────
-# Implements the direct least-squares method (Fitzgibbon et al. 1996).
-# Fits the general conic Ax²+Bxy+Cy²+Dx+Ey+F=0 with the ellipse constraint
-# enforced via a generalized eigenvalue problem — no cv2.fitEllipse used.
-
+    
 class EllipseDetectorScratch:
+    
+    @staticmethod
+    def draw_ellipse_numpy(img, cx, cy, a, b, angle_deg, color, thickness=2):
+        """Colors pixels that fall on the mathematical boundary of a rotated ellipse"""
+        h, w = img.shape[:2]
+        y, x = np.ogrid[:h, :w]
+        
+        theta = np.radians(angle_deg)
+        cos_t = np.cos(theta)
+        sin_t = np.sin(theta)
+        
+        dx = x - cx
+        dy = y - cy
+        
+        # Rotate coordinates back to axis-aligned space
+        rx = dx * cos_t + dy * sin_t
+        ry = -dx * sin_t + dy * cos_t
+        
+        # Calculate distance in ellipse space (1.0 is exactly on the boundary)
+        val = (rx / a)**2 + (ry / b)**2
+        
+        # Margin for line thickness
+        margin = (thickness * 1.5) / min(a, b)
+        
+        mask = (val >= 1.0 - margin) & (val <= 1.0 + margin)
+        img[mask] = color
+        
+        # Draw center point
+        dist_c = np.hypot(dx, dy)
+        img[dist_c <= 3] = (0, 200, 255) # Yellow dot
+        
+        return img
+    
+    
+    @staticmethod
+    def find_edge_groups(binary_img):
+        """Groups touching edge pixels into contour arrays using BFS"""
+        pts = np.argwhere(binary_img > 0)
+        if len(pts) == 0: return []
+        
+        unvisited = set(map(tuple, pts))
+        contours = []
+        dirs = [(-1,-1), (-1,0), (-1,1), (0,-1), (0,1), (1,-1), (1,0), (1,1)]
+        
+        while unvisited:
+            start = unvisited.pop()
+            comp = [start]
+            q = [start]
+            while q:
+                curr = q.pop()
+                for d in dirs:
+                    nxt = (curr[0] + d[0], curr[1] + d[1])
+                    if nxt in unvisited:
+                        unvisited.remove(nxt)
+                        comp.append(nxt)
+                        q.append(nxt)
+                        
+            # Convert from (y, x) to (x, y) coordinates
+            contours.append(np.array([(p[1], p[0]) for p in comp]))
+            
+        return contours
+    
+    
+    @staticmethod
+    def math_morph_close(img_mask):
+        """Dilation followed by Erosion using pure 3x3 array shifting"""
+        p = np.pad(img_mask, 1, mode='edge')
+        
+        # Dilation (Max Pooling)
+        dilated = np.maximum.reduce([
+            p[0:-2, 0:-2], p[0:-2, 1:-1], p[0:-2, 2:],
+            p[1:-1, 0:-2], p[1:-1, 1:-1], p[1:-1, 2:],
+            p[2:, 0:-2],   p[2:, 1:-1],   p[2:, 2:]
+        ])
+        
+        dp = np.pad(dilated, 1, mode='edge')
+        
+        # Erosion (Min Pooling)
+        closed = np.minimum.reduce([
+            dp[0:-2, 0:-2], dp[0:-2, 1:-1], dp[0:-2, 2:],
+            dp[1:-1, 0:-2], dp[1:-1, 1:-1], dp[1:-1, 2:],
+            dp[2:, 0:-2],   dp[2:, 1:-1],   dp[2:, 2:]
+        ])
+        return closed
+    
+    
     @staticmethod
     def _fit_conic(pts):
         """Algebraic least-squares conic fit in NORMALIZED space. Returns normed coeffs + scale info."""
@@ -437,79 +533,67 @@ class EllipseDetectorScratch:
 
     @classmethod
     def detect_ellipses(cls, img_array, min_area=200):
-        """Detect ellipses using CannyScratch edges + from-scratch algebraic fitting."""
         h, w = img_array.shape[:2]
-
-        # Use CannyScratch edge detector; slightly permissive for better contour coverage
-        edges_rgb = CannyScratch.detect(img_array, low_t=20, high_t=60)
-        gray_edges = cv2.cvtColor(edges_rgb, cv2.COLOR_RGB2GRAY)
-
-        # Close small gaps in contours
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        closed = cv2.morphologyEx(gray_edges, cv2.MORPH_CLOSE, kernel)
-
-        contours, _ = cv2.findContours(closed, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
+        
+        # 1. Get Edges (Using the new pure math edge function from the Circle class)
+        gray = HoughCircleScratch.rgb_to_gray(img_array)
+        y_idx, x_idx = HoughCircleScratch.pure_numpy_edges(gray)
+        
+        binary_edges = np.zeros((h, w), dtype=np.uint8)
+        binary_edges[y_idx, x_idx] = 1
+        
+        # 2. Close Gaps (No cv2.morphologyEx)
+        closed_edges = cls.math_morph_close(binary_edges)
+        
+        # 3. Find Contours (No cv2.findContours)
+        contours = cls.find_edge_groups(closed_edges)
+        
         output_img = img_array.copy()
         drawn_centers = []
 
-        for cnt in contours:
-            if len(cnt) < 10:
+        for pts in contours:
+            if len(pts) < 15: # Skip tiny fragments
                 continue
-            area = cv2.contourArea(cnt)
-            if area < min_area:
-                continue
-
-            pts = cnt.reshape(-1, 2).astype(np.float64)
-
-            # Subsample large contours for speed; keep at least 30 points
-            if len(pts) > 300:
-                idx = np.linspace(0, len(pts) - 1, 300, dtype=int)
-                pts = pts[idx]
-            if len(pts) < 6:
+                
+            # 4. Filter by Bounding Box Area (No cv2.contourArea)
+            min_x, min_y = np.min(pts, axis=0)
+            max_x, max_y = np.max(pts, axis=0)
+            bbox_area = (max_x - min_x) * (max_y - min_y)
+            if bbox_area < min_area:
                 continue
 
-            # Fit conic in normalized space
-            a_norm, center_shift, scale = cls._fit_conic(pts)
-            if a_norm is None:
-                continue
+            pts_float = pts.astype(np.float64)
 
-            # Convert back to image-space ellipse parameters
+            # Subsample large contours for fitting speed
+            if len(pts_float) > 300:
+                idx = np.linspace(0, len(pts_float) - 1, 300, dtype=int)
+                pts_float = pts_float[idx]
+
+            a_norm, center_shift, scale = cls._fit_conic(pts_float)
+            if a_norm is None: continue
+
             result = cls._conic_to_ellipse_normalized(a_norm, center_shift, scale)
-            if result is None:
-                continue
+            if result is None: continue
 
             (ecx, ecy), (a, b), angle = result
 
-            # Sanity checks on the resulting ellipse
-            if a < 3 or b < 3:
-                continue
-            if a > 2 * max(h, w):   # absurdly large
-                continue
-            if b / a < 0.05:         # too flat (nearly a line)
+            # Sanity checks
+            if a < 3 or b < 3 or a > 2 * max(h, w) or b / a < 0.05:
                 continue
             if ecx < -a or ecx > w + a or ecy < -b or ecy > h + b:
                 continue
 
-            # Suppress near-duplicate detections
-            too_close = any(
-                np.hypot(ecx - dc[0], ecy - dc[1]) < max(a, b) * 0.5
-                for dc in drawn_centers
-            )
-            if too_close:
+            # Check for duplicates
+            if any(np.hypot(ecx - dc[0], ecy - dc[1]) < max(a, b) * 0.5 for dc in drawn_centers):
                 continue
 
-            try:
-                cv2.ellipse(
-                    output_img,
-                    (int(round(ecx)), int(round(ecy))),
-                    (max(1, int(round(a))), max(1, int(round(b)))),
-                    angle % 180, 0, 360,
-                    (255, 180, 0), 2
-                )
-                cv2.circle(output_img, (int(round(ecx)), int(round(ecy))), 3, (0, 200, 255), -1)
-                drawn_centers.append((ecx, ecy))
-            except (cv2.error, OverflowError):
-                continue
+            # 5. Draw the result (No cv2.ellipse)
+            output_img = cls.draw_ellipse_numpy(
+                output_img, 
+                cx=ecx, cy=ecy, a=a, b=b, 
+                angle_deg=angle, color=(255, 180, 0)
+            )
+            drawn_centers.append((ecx, ecy))
 
         return output_img
 
